@@ -1,6 +1,7 @@
 package org.gbarecomp;
 
 import android.app.Activity;
+import android.view.KeyEvent;
 
 /**
  * Optional per-game extension of the game Activity (for example a second-
@@ -13,4 +14,7 @@ public interface GbaCompanion {
     default void onResume() {}
     default void onPause() {}
     default void onDestroy() {}
+
+    /** Sees key events before SDL; return true to consume (e.g. remap a system button). */
+    default boolean onKeyEvent(KeyEvent event) { return false; }
 }

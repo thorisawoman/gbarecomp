@@ -71,6 +71,12 @@ public class GbaGameActivity extends SDLActivity {
     }
 
     @Override
+    public boolean dispatchKeyEvent(android.view.KeyEvent event) {
+        if (companion != null && companion.onKeyEvent(event)) return true;
+        return super.dispatchKeyEvent(event);
+    }
+
+    @Override
     protected void onResume() {
         super.onResume();
         if (companion != null) companion.onResume();
