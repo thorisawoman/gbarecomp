@@ -2970,6 +2970,15 @@ HostWindow::Events HostWindow::pump() {
             if (SDL_GameControllerGetButton(b->controller, binding.button))
                 keys &= static_cast<uint16_t>(~(1u << binding.bit));
         }
+        // The left stick drives the d-pad too (handhelds with sticks). Each axis past the
+        // deadzone presses its direction, so diagonals come out as two directions.
+        constexpr Sint16 kStickDeadzone = 12000;
+        const Sint16 lx = SDL_GameControllerGetAxis(b->controller, SDL_CONTROLLER_AXIS_LEFTX);
+        const Sint16 ly = SDL_GameControllerGetAxis(b->controller, SDL_CONTROLLER_AXIS_LEFTY);
+        if (lx > kStickDeadzone) keys &= static_cast<uint16_t>(~(1u << 4));
+        if (lx < -kStickDeadzone) keys &= static_cast<uint16_t>(~(1u << 5));
+        if (ly < -kStickDeadzone) keys &= static_cast<uint16_t>(~(1u << 6));
+        if (ly > kStickDeadzone) keys &= static_cast<uint16_t>(~(1u << 7));
     }
     if (b->touch_controls) {
         const uint16_t touch_buttons = active_touch_buttons(b);
