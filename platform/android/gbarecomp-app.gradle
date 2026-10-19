@@ -14,7 +14,8 @@
 //   romLabel, biosRequired (false), orientation ("landscape"|"portrait"|"any"),
 //   payloadVersion ("1"), setupNote, gyro (false), payloadDirs ([[from:File, into:String]]),
 //   cmakeArguments ([]), recompUiRoot (File), releaseAbis (["arm64-v8a"]),
-//   debugAbis (["arm64-v8a","x86_64"])
+//   debugAbis (["arm64-v8a","x86_64"]), companion (GbaCompanion class name),
+//   javaDirs ([File]: extra Java sources of the game, e.g. its companion)
 //
 // Private personal builds may embed verified assets (never distribute them):
 //   -PprivateRom=<path> [-PprivateBios=<path>]
@@ -111,6 +112,7 @@ android {
             gbaPayloadVersion: "${g.payloadVersion ?: '1'}",
             gbaSetupNote: g.setupNote ?: "",
             gbaGyro: "${g.gyro ?: false}",
+            gbaCompanion: g.companion ?: "",
         ]
 
         externalNativeBuild {
@@ -180,7 +182,7 @@ android {
         main {
             manifest.srcFile new File(platformRoot, "AndroidManifest.xml")
             java.srcDirs = [new File(sdlRoot, "android-project/app/src/main/java"),
-                            new File(platformRoot, "java")]
+                            new File(platformRoot, "java")] + (g.javaDirs ?: []).collect { file(it) }
             res.srcDirs = [new File(platformRoot, "res"), file("src/main/res")]
             assets.srcDirs = [stagedPayload]
         }

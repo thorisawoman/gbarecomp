@@ -31,6 +31,7 @@
         <meta-data android:name="gbarecomp.payload_version" android:value="${gbaPayloadVersion}" />
         <meta-data android:name="gbarecomp.setup_note" android:value="${gbaSetupNote}" />
         <meta-data android:name="gbarecomp.gyro" android:value="${gbaGyro}" />
+        <meta-data android:name="gbarecomp.companion" android:value="${gbaCompanion}" />
 
         <activity
             android:name="org.gbarecomp.GbaSetupActivity"

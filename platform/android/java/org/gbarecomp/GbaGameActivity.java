@@ -31,6 +31,7 @@ import java.nio.charset.StandardCharsets;
 public class GbaGameActivity extends SDLActivity {
     private GbaGameConfig config;
     private boolean nativeReady;
+    private GbaCompanion companion;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -55,6 +56,36 @@ public class GbaGameActivity extends SDLActivity {
             return view.onApplyWindowInsets(insets);
         });
         enterImmersiveMode();
+        companion = createCompanion(config.companionClass);
+        if (companion != null) companion.onCreate(this);
+    }
+
+    private static GbaCompanion createCompanion(String className) {
+        if (className == null || className.isEmpty()) return null;
+        try {
+            return (GbaCompanion) Class.forName(className).getDeclaredConstructor().newInstance();
+        } catch (ReflectiveOperationException | ClassCastException error) {
+            android.util.Log.e("gbarecomp", "companion " + className + " unavailable", error);
+            return null;
+        }
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        if (companion != null) companion.onResume();
+    }
+
+    @Override
+    protected void onPause() {
+        if (companion != null) companion.onPause();
+        super.onPause();
+    }
+
+    @Override
+    protected void onDestroy() {
+        if (companion != null) companion.onDestroy();
+        super.onDestroy();
     }
 
     @Override
