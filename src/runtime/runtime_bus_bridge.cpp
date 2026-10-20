@@ -804,6 +804,15 @@ extern "C" void runtime_tick(uint32_t cycles) {
             recompute_event_budget(bus, ppu);
         }
         runtime_irq(g_cpu.R[15]);
+    } else if (bus->io().halted() &&
+               (bus->io().ie() & bus->io().if_reg()) != 0u) {
+        // HALT ends as soon as an enabled interrupt is requested (IE & IF),
+        // whatever IME or CPSR.I say; the CPU then resumes after the halt
+        // without vectoring. Only waking on a takeable IRQ left a CPU that
+        // was halted with IME=0 (a bridge that ran past HALTCNT into the
+        // BIOS IntrWait check, then healed there) parked forever: frames kept
+        // coming, the guest never ran again (KHCOM Wonderland boss freeze).
+        bus->io().clear_halt();
     }
 
 #ifdef GBA_COSIM

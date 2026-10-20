@@ -66,6 +66,10 @@ bool mobile_prepare_process(std::vector<std::string>& args,
     if (const char* storage = SDL_AndroidGetInternalStoragePath())
         (void)chdir(storage);
     const char* log = options.log_file ? options.log_file : "android-runtime.log";
+    // Android restarts the activity right after a crash, which would truncate
+    // the crashed session's log before anyone can read it. Keep one previous.
+    const std::string prev_log = std::string(log) + ".prev";
+    (void)std::rename(log, prev_log.c_str());
     // One open file description for both streams: separate freopen()s would
     // give stderr and stdout independent offsets, and each would overwrite
     // the other's lines in the shared log.
@@ -77,6 +81,10 @@ bool mobile_prepare_process(std::vector<std::string>& args,
     // No compiler on the device: misses bridge loudly and are reported for
     // the offline heal loop instead of attempting an on-device rebuild.
     setenv("GBARECOMP_SELFHEAL_RECOMPILE", "0", 0);
+    // Name each missed PC once in the log: there is no exit miss report when
+    // the process is killed or crashes, and these lines are what the offline
+    // heal loop needs.
+    setenv("GBARECOMP_SELFHEAL_VERBOSE", "1", 0);
     std::fprintf(stderr,
                  "mobile: storage=%s selfheal=report-only "
                  "(dispatch misses bridge loudly -> recomp_master_misses.toml.frag)\n",

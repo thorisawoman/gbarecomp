@@ -227,6 +227,9 @@ void runtime_call_cancel_return(uint32_t return_pc);
 // stack capacity). Returned pointer is valid until the next push/pop.
 uint32_t        runtime_call_stack_depth(void);
 const uint32_t* runtime_call_stack_data(void);
+// Lowest index a guest return may match or pop (raised while an IRQ handler
+// runs; see g_call_return_floor in runtime_arm.cpp).
+uint32_t        runtime_call_stack_floor(void);
 void            runtime_call_stack_restore(const uint32_t* entries,
                                            uint32_t depth);
 // Restored entries have no host frame. When the stack is full, a push evicts

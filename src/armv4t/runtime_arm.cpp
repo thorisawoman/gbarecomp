@@ -1020,6 +1020,10 @@ extern "C" const uint32_t* runtime_call_stack_data(void) {
     return g_call_return_stack;
 }
 
+extern "C" uint32_t runtime_call_stack_floor(void) {
+    return g_call_return_floor;
+}
+
 extern "C" void runtime_call_stack_restore(const uint32_t* entries,
                                            uint32_t depth) {
     if (depth > kCallReturnStackSize) depth = kCallReturnStackSize;

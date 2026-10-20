@@ -62,6 +62,8 @@ struct MissRec {
     // and console I/O is slow enough to dominate windowed wall-time. (recomp-
     // template PRINCIPLES: structured debug surface, never printf spam.)
     bool          toplevel_logged = false;
+    // The stall-fallback line (a bridge that never reached its stop), once/PC.
+    bool          stall_logged = false;
 };
 
 std::map<std::uint32_t, MissRec> g_misses;        // keyed by PC & ~1
@@ -84,6 +86,21 @@ std::string g_prog_sha1;
 // that never reaches the stop address) fails loudly instead of hanging
 // forever. Far above any real BIOS/cart subroutine length.
 constexpr std::uint64_t kBridgeIterationCap = 200'000'000ull;
+
+// A bridge that has not returned after this many instructions stops waiting
+// for its stop address and hands control back to native code at the next
+// static entry instead (see the stall fallback in runtime_bridge_interpret).
+// ~0.1 s of guest time: no real subroutine runs this long, while a bridge whose
+// stop address is gone (the frame was never going to be returned to) would
+// otherwise interpret the whole game loop unpaced until the cap aborts. The
+// bridge is not frame-paced, so this also bounds the visible speed-up.
+constexpr std::uint64_t kBridgeStallInsns = 2'000'000ull;
+
+// HALT inside a bridge: guest cycles idled per step while waiting for the
+// wake-up, and the most idled before giving up (two frames; the wake-up is
+// normally the next VBlank).
+constexpr std::uint32_t kBridgeHaltChunk = 64u;
+constexpr std::uint32_t kBridgeHaltIdleCap = 2u * 280896u;
 
 }  // namespace
 
@@ -492,6 +509,20 @@ extern "C" int runtime_bridge_interpret(uint32_t entry_pc, bool entry_thumb,
     // so the recompiled intr_main reaches its iret. (forced_stop_pc != 0 is the
     // sljit gate's bounded pass — never an IRQ continuation.)
     const bool irq_cont = (g_irq_nest_depth != 0u) && (forced_stop_pc == 0u);
+    // Frames a return may match, as runtime_call_should_return sees them: the
+    // stack above the IRQ floor. A guest return can skip the top frame and
+    // land on a deeper one (agbcc's long `bl` jumps inside one big function
+    // push frames that are never returned to), and native code handles that by
+    // popping every frame above the match. The bridge does the same; waiting
+    // for the top frame alone runs away (KHCOM's Wonderland boss fight).
+    const std::uint32_t entry_floor = runtime_call_stack_floor();
+    // Depth the stack is restored to on return: the top frame popped, or
+    // everything from a deeper matched frame up.
+    std::uint32_t return_depth = entry_depth != 0u ? entry_depth - 1u : 0u;
+    // Set once the bridge stalls (kBridgeStallInsns): from then on it heals to
+    // the next static entry like a top-level miss.
+    bool stalled = false;
+    std::uint32_t entry_mode = 0;
 
     // Snapshot the entry stack so we can restore it exactly (minus the popped
     // frame) regardless of how IRQ/SWI excursions perturb it mid-bridge.
@@ -507,6 +538,7 @@ extern "C" int runtime_bridge_interpret(uint32_t entry_pc, bool entry_thumb,
     cpu.R[15]    = entry_pc;
     cpu.cpsr.t   = entry_thumb;
     cpu.thumb    = entry_thumb;
+    entry_mode   = cpu.cpsr.mode;
 
     // ── (3) Interpret the subtree until control returns to stop_pc ──
     // Call-nesting pre-flight (for the gate's depth bound): a stack of the
@@ -597,23 +629,50 @@ extern "C" int runtime_bridge_interpret(uint32_t entry_pc, bool entry_thumb,
                 runtime_note_interpreted_exception_return(old_mode);
             }
             g_tick_ctx = "bridge"; runtime_tick(cyc); g_tick_ctx = "gen";
+            // HALTCNT stops the CPU until IE & IF (runtime_tick wakes it, and
+            // takes the IRQ when it can). Native code yields here; the bridge
+            // has to idle, or it runs on into the BIOS IntrWait check with the
+            // CPU still halted and IME cleared.
+            for (std::uint32_t idled = 0;
+                 bus->io().halted() && idled < kBridgeHaltIdleCap;
+                 idled += kBridgeHaltChunk) {
+                g_tick_ctx = "bridge"; runtime_tick(kBridgeHaltChunk); g_tick_ctx = "gen";
+            }
             gbarecomp::load_arm_cpu_into_interp(g_cpu, cpu);
         }
 
         // Call-nesting pre-flight update (see the call_nest declaration above).
+        const std::uint32_t newpc  = cpu.R[15] & ~1u;
+        const std::uint32_t seqpc  = (pc + (was_thumb ? 2u : 4u)) & ~1u;
+        const bool branched = (newpc != seqpc);
+        const bool is_call = branched &&
+            (insn.op == armv4t::IrOp::BL ||
+             insn.op == armv4t::IrOp::BL_suffix ||
+             insn.op == armv4t::IrOp::BLX_reg);
+        // A register/stack branch (bx lr, pop {pc}, mov pc, ...) is where
+        // generated code asks runtime_call_should_return.
+        const bool is_return = branched && !is_call &&
+            insn.op != armv4t::IrOp::B && insn.op != armv4t::IrOp::BL_prefix;
+        // Whether this return went back to a call the bridge itself made.
+        bool returned_in_nest = false;
         {
-            const std::uint32_t newpc  = cpu.R[15] & ~1u;
-            const std::uint32_t seqpc  = (pc + (was_thumb ? 2u : 4u)) & ~1u;
-            const bool branched = (newpc != seqpc);
-            // Pop returns: an actual branch landing on an open call's return addr.
+            // Pop returns: an actual branch landing on an open call's return
+            // addr, or a return to a deeper open call (popping the ones above).
             if (branched)
-                while (!call_nest.empty() && newpc == (call_nest.back() & ~1u))
+                while (!call_nest.empty() && newpc == (call_nest.back() & ~1u)) {
                     call_nest.pop_back();
+                    returned_in_nest = true;
+                }
+            if (is_return && !returned_in_nest && !call_nest.empty()) {
+                for (std::size_t i = call_nest.size() - 1; i-- > 0;) {
+                    if ((call_nest[i] & ~1u) == newpc) {
+                        call_nest.resize(i);
+                        returned_in_nest = true;
+                        break;
+                    }
+                }
+            }
             // Push calls: BL/BL_suffix(THUMB)/BLX that actually transferred.
-            const bool is_call = branched &&
-                (insn.op == armv4t::IrOp::BL ||
-                 insn.op == armv4t::IrOp::BL_suffix ||
-                 insn.op == armv4t::IrOp::BLX_reg);
             if (is_call) {
                 call_nest.push_back(cpu.R[14]);  // the return address the call set
                 if (call_nest.size() > g_bridge_max_call_depth)
@@ -623,6 +682,23 @@ extern "C" int runtime_bridge_interpret(uint32_t entry_pc, bool entry_thumb,
         }
 
         if (!irq_cont && (cpu.R[15] & ~1u) == stop_pc) break;
+
+        // A return past the top frame to a deeper one (see entry_floor above).
+        // A return to a call the bridge made itself stays inside the subtree;
+        // anything else is looked up in the entry stack, below the bridge's own
+        // open calls, exactly as runtime_call_should_return would.
+        if (is_return && !returned_in_nest && !irq_cont && !top_level &&
+            forced_stop_pc == 0u && entry_depth >= 2u) {
+            bool matched = false;
+            for (std::uint32_t i = entry_depth - 1u; i-- > entry_floor;) {
+                if ((entry_stack[i] & ~1u) == newpc) {
+                    return_depth = i;
+                    matched = true;
+                    break;
+                }
+            }
+            if (matched) break;
+        }
 
         // Heal-to-static: for a top-level miss (no reliable return address),
         // the moment the bridged subtree branches/returns back into a
@@ -637,9 +713,35 @@ extern "C" int runtime_bridge_interpret(uint32_t entry_pc, bool entry_thumb,
         // native so the recompiled intr_main can run its iret (which sets
         // g_irq_iret_depth via runtime_exception_return) and terminate
         // runtime_irq()'s drive loop.
-        if ((irq_cont || top_level) && (cpu.R[15] & ~1u) != entry_pc &&
+        // A stalled bridge heals only into cart/RAM code at the mode it was
+        // entered in: a BIOS entry is mid-SWI (IntrWait's check, say) and
+        // hands native code a half-finished system call.
+        const bool stall_heal_ok = stalled &&
+            (cpu.R[15] & ~1u) >= 0x02000000u && cpu.cpsr.mode == entry_mode;
+        if ((irq_cont || top_level || stall_heal_ok) && (cpu.R[15] & ~1u) != entry_pc &&
             runtime_has_static_entry(cpu.R[15], cpu.thumb ? 1 : 0)) {
             break;
+        }
+
+        // Stall fallback: a non-top-level bridge that never reaches its stop
+        // would interpret the game loop unpaced (the game visibly speeds up)
+        // until the cap aborts. Heal to static instead: the generated callers
+        // see R15 != their return address and unwind to the dispatch loop,
+        // the same cascade a mismatched native return takes.
+        if (!stalled && max_instrs == 0u && !irq_cont && !top_level &&
+            iters >= kBridgeStallInsns) {
+            stalled = true;
+            MissRec& mr = g_misses[entry_pc & ~1u];
+            if (!mr.stall_logged) {
+                mr.stall_logged = true;
+                std::fprintf(stderr,
+                    "runtime_arm: SELF-HEAL bridge for 0x%08X did not return "
+                    "to stop_pc=0x%08X within %llu instructions (pc=0x%08X); "
+                    "healing to the next static entry.\n",
+                    entry_pc, stop_pc,
+                    static_cast<unsigned long long>(kBridgeStallInsns),
+                    cpu.R[15]);
+            }
         }
 
         if (++iters > cap) {
@@ -674,10 +776,11 @@ extern "C" int runtime_bridge_interpret(uint32_t entry_pc, bool entry_thumb,
     // runtime_irq()'s loop re-dispatches the static entry natively — so do not
     // pop a call-return frame here.
     if (!top_level && !irq_cont) {
-        // Restore the entry stack minus exactly the one frame the missed
-        // subroutine's return idiom (`bx lr` / `pop {pc}`) would have popped
-        // via runtime_call_should_return.
-        runtime_call_stack_restore(entry_stack.data(), entry_depth - 1);
+        // Restore the entry stack minus the frames the missed subroutine's
+        // return idiom (`bx lr` / `pop {pc}`) would have popped via
+        // runtime_call_should_return: the top one, or a deeper match and all
+        // above it.
+        runtime_call_stack_restore(entry_stack.data(), return_depth);
     }
     // Control returns to the recompiled caller's BL site, which checks
     // g_cpu.R[15] == its pushed return address (== stop_pc) and continues.
